@@ -7,15 +7,25 @@ from plotly.subplots import make_subplots
 import matplotlib.pyplot as plt
 import seaborn as sns
 from scipy import stats
+from scipy.stats import (
+    shapiro, normaltest, anderson, kstest,
+    ttest_ind, ttest_rel, mannwhitneyu, wilcoxon,
+    kruskal, f_oneway, friedmanchisquare,
+    pearsonr, spearmanr, kendalltau,
+    chi2_contingency, fisher_exact, barnard_exact
+)
+import statsmodels.api as sm
+from statsmodels.formula.api import ols
+from statsmodels.stats.multicomp import pairwise_tukeyhsd
+from statsmodels.stats.proportion import proportions_ztest
+from statsmodels.stats.weightstats import DescrStatsW
 import io
-import base64
-from datetime import datetime
 import warnings
 warnings.filterwarnings('ignore')
 
 # Page configuration
 st.set_page_config(
-    page_title="Data Analysis & Visualization Dashboard",
+    page_title="Advanced Statistical Analysis Tool",
     page_icon="📊",
     layout="wide"
 )
@@ -25,12 +35,15 @@ if 'data' not in st.session_state:
     st.session_state.data = None
 if 'analysis_results' not in st.session_state:
     st.session_state.analysis_results = {}
+if 'test_suggestions' not in st.session_state:
+    st.session_state.test_suggestions = {}
 
 # Title and description
-st.title("📊 Comprehensive Data Analysis & Visualization Tool")
+st.title("📊 Advanced Statistical Analysis & Visualization Tool")
 st.markdown("""
-This tool provides automated data analysis and visualization for any uploaded dataset.
-It will automatically detect data types and generate appropriate visualizations and statistics.
+This tool automatically analyzes your data, suggests appropriate statistical tests 
+(both parametric and non-parametric), and performs comprehensive statistical analysis 
+based on data characteristics.
 """)
 
 # Sidebar for file upload and controls
@@ -54,39 +67,50 @@ with st.sidebar:
     
     st.divider()
     
-    # Analysis options
-    st.header("⚙️ Analysis Options")
-    show_missing = st.checkbox("Show missing data analysis", value=True)
-    show_numeric = st.checkbox("Show numeric variable analysis", value=True)
-    show_categorical = st.checkbox("Show categorical variable analysis", value=True)
-    show_correlation = st.checkbox("Show correlation analysis", value=True)
-    show_distributions = st.checkbox("Show distribution plots", value=True)
+    # Analysis settings
+    st.header("⚙️ Analysis Settings")
+    significance_level = st.slider(
+        "Significance Level (α)",
+        min_value=0.01,
+        max_value=0.10,
+        value=0.05,
+        step=0.01
+    )
     
-    # Export options
+    auto_suggest = st.checkbox("Auto-suggest statistical tests", value=True)
+    perform_tests = st.checkbox("Automatically perform suggested tests", value=True)
+    
     st.divider()
-    st.header("💾 Export Options")
-    if st.button("Generate Report"):
-        if st.session_state.data is not None:
-            st.session_state.generate_report = True
-        else:
-            st.warning("Please upload data first")
+    
+    # Visualization settings
+    st.header("📈 Visualization Settings")
+    plot_theme = st.selectbox(
+        "Plot Theme",
+        ["plotly", "plotly_white", "plotly_dark", "ggplot2", "seaborn"]
+    )
+    
+    color_palette = st.selectbox(
+        "Color Palette",
+        ["Viridis", "Plasma", "Inferno", "Magma", "Cividis", "Turbo"]
+    )
 
 # Main content area
 if st.session_state.data is not None:
     df = st.session_state.data
     
     # Create tabs for different analyses
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
         "📋 Data Overview", 
-        "📊 Descriptive Statistics", 
-        "📈 Visualizations",
-        "🔗 Correlations",
-        "📑 Report"
+        "📊 Normality Tests",
+        "📈 Hypothesis Testing",
+        "🔗 Correlation Analysis",
+        "📉 Regression Analysis",
+        "📑 Complete Report"
     ])
     
-    # Tab 1: Data Overview
+    # Tab 1: Data Overview with Automatic Test Suggestions
     with tab1:
-        st.header("Dataset Overview")
+        st.header("Dataset Overview & Test Suggestions")
         
         col1, col2, col3, col4 = st.columns(4)
         with col1:
@@ -96,392 +120,728 @@ if st.session_state.data is not None:
         with col3:
             st.metric("Missing Values", df.isna().sum().sum())
         with col4:
-            st.metric("Memory Usage", f"{df.memory_usage(deep=True).sum() / 1024**2:.2f} MB")
+            st.metric("Complete Cases", df.dropna().shape[0])
         
-        st.subheader("First 10 Rows")
-        st.dataframe(df.head(10), use_container_width=True)
+        # Automatic data type detection and test suggestions
+        st.subheader("🔍 Automatic Test Suggestions Based on Data")
         
-        st.subheader("Data Types")
-        dtypes_df = pd.DataFrame({
-            'Column': df.columns,
-            'Data Type': df.dtypes.values,
-            'Non-Null Count': df.count().values,
-            'Null Count': df.isna().sum().values,
-            'Null %': (df.isna().sum().values / len(df) * 100).round(2),
-            'Unique Values': [df[col].nunique() for col in df.columns]
-        })
-        st.dataframe(dtypes_df, use_container_width=True)
+        numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+        categorical_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
         
-        # Missing data visualization
-        if show_missing and df.isna().any().any():
-            st.subheader("Missing Data Visualization")
+        # Create suggestion dataframe
+        suggestions = []
+        
+        for col in numeric_cols:
+            data = df[col].dropna()
+            n = len(data)
             
-            fig = make_subplots(
-                rows=1, cols=2,
-                subplot_titles=('Missing Values Count', 'Missing Values Percentage')
-            )
-            
-            missing_counts = df.isna().sum()
-            missing_percent = (missing_counts / len(df) * 100)
-            
-            # Filter columns with missing values
-            missing_cols = missing_counts[missing_counts > 0]
-            
-            if len(missing_cols) > 0:
-                # Bar chart for missing counts
-                fig.add_trace(
-                    go.Bar(x=missing_cols.index, y=missing_cols.values,
-                          name='Missing Count', marker_color='red'),
-                    row=1, col=1
-                )
+            # Check normality
+            if n >= 3:
+                if n <= 5000:
+                    stat, p_value = shapiro(data)
+                    is_normal = p_value > significance_level
+                else:
+                    stat, p_value = normaltest(data)
+                    is_normal = p_value > significance_level
                 
-                # Bar chart for missing percentages
-                fig.add_trace(
-                    go.Bar(x=missing_cols.index, y=missing_percent[missing_cols.index],
-                          name='Missing %', marker_color='orange'),
-                    row=1, col=2
-                )
-                
-                fig.update_layout(height=400, showlegend=False)
-                fig.update_xaxes(tickangle=45)
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.info("No missing values found in the dataset")
+                # Suggest tests based on normality
+                if is_normal:
+                    suggestions.append({
+                        'Variable': col,
+                        'Type': 'Numeric (Normal)',
+                        'Parametric Tests': 't-test, ANOVA, Pearson Correlation',
+                        'Non-Parametric Alternatives': 'Mann-Whitney U, Kruskal-Wallis, Spearman',
+                        'Normality Test': f"Shapiro-Wilk p={p_value:.4f}",
+                        'Distribution': 'Normal'
+                    })
+                else:
+                    suggestions.append({
+                        'Variable': col,
+                        'Type': 'Numeric (Non-normal)',
+                        'Parametric Tests': '⚠️ Not recommended',
+                        'Non-Parametric Tests': 'Mann-Whitney U, Wilcoxon, Kruskal-Wallis, Spearman',
+                        'Normality Test': f"Shapiro-Wilk p={p_value:.4f}",
+                        'Distribution': 'Non-normal'
+                    })
+        
+        for col in categorical_cols:
+            unique_count = df[col].nunique()
+            suggestions.append({
+                'Variable': col,
+                'Type': 'Categorical',
+                'Parametric Tests': 'N/A',
+                'Non-Parametric Tests': f'Chi-square, Fisher\'s Exact (if 2x2)',
+                'Categories': f'{unique_count} unique values',
+                'Distribution': 'Categorical'
+            })
+        
+        suggestions_df = pd.DataFrame(suggestions)
+        st.dataframe(suggestions_df, use_container_width=True)
+        
+        # Summary statistics by variable type
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("📊 Numeric Variables Summary")
+            if numeric_cols:
+                numeric_summary = df[numeric_cols].describe().T
+                numeric_summary['skew'] = df[numeric_cols].skew()
+                numeric_summary['kurtosis'] = df[numeric_cols].kurtosis()
+                st.dataframe(numeric_summary.round(3), use_container_width=True)
+        
+        with col2:
+            st.subheader("📋 Categorical Variables Summary")
+            if categorical_cols:
+                cat_summary = []
+                for col in categorical_cols[:5]:  # Limit to first 5
+                    cat_summary.append({
+                        'Variable': col,
+                        'Categories': df[col].nunique(),
+                        'Mode': df[col].mode().iloc[0] if not df[col].mode().empty else 'N/A',
+                        'Mode Freq': df[col].value_counts().iloc[0] if not df[col].value_counts().empty else 0,
+                        'Missing': df[col].isna().sum()
+                    })
+                st.dataframe(pd.DataFrame(cat_summary), use_container_width=True)
     
-    # Tab 2: Descriptive Statistics
+    # Tab 2: Normality Tests
     with tab2:
-        st.header("Descriptive Statistics")
+        st.header("Normality Assessment")
         
-        # Numeric variables
         numeric_cols = df.select_dtypes(include=[np.number]).columns
-        if len(numeric_cols) > 0 and show_numeric:
-            st.subheader("Numeric Variables Summary")
-            
-            # Calculate statistics
-            stats_df = pd.DataFrame()
-            for col in numeric_cols:
-                stats_df[col] = [
-                    df[col].count(),
-                    df[col].mean(),
-                    df[col].std(),
-                    df[col].var(),
-                    df[col].min(),
-                    df[col].quantile(0.25),
-                    df[col].median(),
-                    df[col].quantile(0.75),
-                    df[col].max(),
-                    df[col].skew(),
-                    df[col].kurtosis(),
-                    df[col].isna().sum()
-                ]
-            
-            stats_df.index = ['Count', 'Mean', 'Std Dev', 'Variance', 'Min', 
-                             '25%', 'Median', '75%', 'Max', 'Skewness', 
-                             'Kurtosis', 'Missing']
-            
-            st.dataframe(stats_df.round(3), use_container_width=True)
-            
-            # Interpretation
-            with st.expander("📖 Interpretation Guide"):
-                st.markdown("""
-                - **Skewness**: 
-                    - Near 0: Symmetric distribution
-                    - Positive: Right-skewed (tail to the right)
-                    - Negative: Left-skewed (tail to the left)
-                - **Kurtosis**:
-                    - Near 0: Normal distribution
-                    - Positive: Heavy tails, sharp peak
-                    - Negative: Light tails, flat peak
-                """)
         
-        # Categorical variables
-        cat_cols = df.select_dtypes(include=['object', 'category']).columns
-        if len(cat_cols) > 0 and show_categorical:
-            st.subheader("Categorical Variables Summary")
+        if len(numeric_cols) > 0:
+            selected_var = st.selectbox("Select variable for normality tests", numeric_cols)
             
-            selected_cat = st.selectbox("Select categorical variable", cat_cols)
-            
-            # Frequency table
-            freq_df = df[selected_cat].value_counts().reset_index()
-            freq_df.columns = ['Category', 'Frequency']
-            freq_df['Percentage'] = (freq_df['Frequency'] / len(df) * 100).round(2)
-            freq_df['Cumulative %'] = freq_df['Percentage'].cumsum()
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                st.dataframe(freq_df, use_container_width=True)
-            
-            with col2:
-                # Bar chart
-                fig = px.bar(freq_df.head(15), x='Category', y='Frequency',
-                           title=f'Top 15 Categories - {selected_cat}',
-                           color='Frequency', color_continuous_scale='Viridis')
-                fig.update_xaxes(tickangle=45)
-                st.plotly_chart(fig, use_container_width=True)
-    
-    # Tab 3: Visualizations
-    with tab3:
-        st.header("Data Visualizations")
-        
-        if show_distributions:
-            # Numeric distributions
-            numeric_cols = df.select_dtypes(include=[np.number]).columns
-            if len(numeric_cols) > 0:
-                st.subheader("Numeric Variable Distributions")
-                
-                # Select variables for visualization
-                selected_numeric = st.multiselect(
-                    "Select numeric variables to visualize",
-                    numeric_cols,
-                    default=numeric_cols[:min(3, len(numeric_cols))]
-                )
-                
-                if selected_numeric:
-                    # Create subplot grid
-                    n_cols = min(2, len(selected_numeric))
-                    n_rows = (len(selected_numeric) + 1) // 2
-                    
-                    fig = make_subplots(
-                        rows=n_rows, cols=n_cols,
-                        subplot_titles=selected_numeric
-                    )
-                    
-                    for i, col in enumerate(selected_numeric):
-                        row = i // n_cols + 1
-                        col_num = i % n_cols + 1
-                        
-                        # Add histogram
-                        fig.add_trace(
-                            go.Histogram(x=df[col].dropna(), name=col,
-                                       marker_color='lightblue', opacity=0.7),
-                            row=row, col=col_num
-                        )
-                        
-                        # Add density line
-                        hist_data = df[col].dropna()
-                        if len(hist_data) > 1:
-                            kernel_density = stats.gaussian_kde(hist_data)
-                            x_range = np.linspace(hist_data.min(), hist_data.max(), 100)
-                            fig.add_trace(
-                                go.Scatter(x=x_range, y=kernel_density(x_range),
-                                         mode='lines', name=f'{col} density',
-                                         line=dict(color='red', width=2)),
-                                row=row, col=col_num
-                            )
-                    
-                    fig.update_layout(height=300 * n_rows, showlegend=False)
-                    fig.update_xaxes(title_text="Value")
-                    fig.update_yaxes(title_text="Frequency")
-                    
-                    st.plotly_chart(fig, use_container_width=True)
-            
-            # Box plots
-            if len(selected_numeric) > 0:
-                st.subheader("Box Plots")
-                fig = go.Figure()
-                for col in selected_numeric:
-                    fig.add_trace(go.Box(y=df[col].dropna(), name=col))
-                fig.update_layout(height=500)
-                st.plotly_chart(fig, use_container_width=True)
-            
-            # Categorical visualizations
-            cat_cols = df.select_dtypes(include=['object', 'category']).columns
-            if len(cat_cols) > 0:
-                st.subheader("Categorical Variable Visualizations")
-                
-                selected_cat_viz = st.selectbox(
-                    "Select categorical variable for visualization",
-                    cat_cols,
-                    key='cat_viz'
-                )
+            if selected_var:
+                data = df[selected_var].dropna()
                 
                 col1, col2 = st.columns(2)
                 
                 with col1:
-                    # Bar chart
-                    value_counts = df[selected_cat_viz].value_counts().head(15)
-                    fig_bar = px.bar(
-                        x=value_counts.index, y=value_counts.values,
-                        title=f'Bar Chart - {selected_cat_viz}',
-                        labels={'x': 'Category', 'y': 'Count'}
-                    )
-                    fig_bar.update_xaxes(tickangle=45)
-                    st.plotly_chart(fig_bar, use_container_width=True)
+                    st.subheader("Statistical Tests")
+                    
+                    # Shapiro-Wilk Test
+                    if len(data) <= 5000:
+                        stat, p_value = shapiro(data)
+                        st.write(f"**Shapiro-Wilk Test:**")
+                        st.write(f"- Statistic: {stat:.4f}")
+                        st.write(f"- P-value: {p_value:.4f}")
+                        st.write(f"- {'✓ Normal' if p_value > significance_level else '✗ Non-normal'} (α={significance_level})")
+                    
+                    # D'Agostino's K^2 Test
+                    stat, p_value = normaltest(data)
+                    st.write(f"\n**D'Agostino's K² Test:**")
+                    st.write(f"- Statistic: {stat:.4f}")
+                    st.write(f"- P-value: {p_value:.4f}")
+                    st.write(f"- {'✓ Normal' if p_value > significance_level else '✗ Non-normal'}")
+                    
+                    # Anderson-Darling Test
+                    result = anderson(data)
+                    st.write(f"\n**Anderson-Darling Test:**")
+                    st.write(f"- Statistic: {result.statistic:.4f}")
+                    st.write(f"- Critical values: {result.critical_values}")
+                    st.write(f"- Significance level: {result.significance_level}")
+                    
+                    # Kolmogorov-Smirnov Test
+                    stat, p_value = kstest(data, 'norm', args=(data.mean(), data.std()))
+                    st.write(f"\n**Kolmogorov-Smirnov Test:**")
+                    st.write(f"- Statistic: {stat:.4f}")
+                    st.write(f"- P-value: {p_value:.4f}")
                 
                 with col2:
-                    # Pie chart (if <= 10 categories)
-                    if len(value_counts) <= 10:
-                        fig_pie = px.pie(
-                            values=value_counts.values,
-                            names=value_counts.index,
-                            title=f'Pie Chart - {selected_cat_viz}'
-                        )
-                        st.plotly_chart(fig_pie, use_container_width=True)
+                    st.subheader("Visual Normality Checks")
+                    
+                    # Q-Q Plot
+                    fig = go.Figure()
+                    fig.add_trace(go.Scatter(
+                        x=np.random.normal(0, 1, len(data)),
+                        y=np.sort(data),
+                        mode='markers',
+                        name='Q-Q Plot',
+                        marker=dict(color='blue', size=5)
+                    ))
+                    fig.add_trace(go.Scatter(
+                        x=[-3, 3],
+                        y=[data.mean() - 3*data.std(), data.mean() + 3*data.std()],
+                        mode='lines',
+                        name='Reference Line',
+                        line=dict(color='red', dash='dash')
+                    ))
+                    fig.update_layout(
+                        title="Q-Q Plot",
+                        xaxis_title="Theoretical Quantiles",
+                        yaxis_title="Sample Quantiles"
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                    
+                    # Distribution plot
+                    fig = px.histogram(
+                        data, nbins=30,
+                        title=f"Distribution of {selected_var}",
+                        labels={'value': selected_var, 'count': 'Frequency'}
+                    )
+                    fig.add_vline(x=data.mean(), line_dash="dash", line_color="red",
+                                 annotation_text=f"Mean: {data.mean():.2f}")
+                    fig.add_vline(x=data.median(), line_dash="dash", line_color="green",
+                                 annotation_text=f"Median: {data.median():.2f}")
+                    st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.warning("No numeric variables found for normality testing")
     
-    # Tab 4: Correlations
+    # Tab 3: Hypothesis Testing
+    with tab3:
+        st.header("Statistical Hypothesis Testing")
+        
+        test_type = st.selectbox(
+            "Select test type",
+            ["Two-group comparison (Independent)", 
+             "Two-group comparison (Paired)",
+             "Multiple groups comparison",
+             "Proportion test",
+             "Goodness of fit"]
+        )
+        
+        numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+        categorical_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
+        
+        if test_type == "Two-group comparison (Independent)":
+            st.subheader("Independent Two-Group Comparison")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                numeric_var = st.selectbox("Select numeric variable", numeric_cols, key='ind_num')
+            
+            with col2:
+                group_var = st.selectbox("Select grouping variable", categorical_cols, key='ind_cat')
+            
+            if numeric_var and group_var:
+                groups = df[group_var].dropna().unique()
+                if len(groups) == 2:
+                    group1_data = df[df[group_var] == groups[0]][numeric_var].dropna()
+                    group2_data = df[df[group_var] == groups[1]][numeric_var].dropna()
+                    
+                    # Check normality
+                    _, p1 = shapiro(group1_data) if len(group1_data) <= 5000 else (None, 0)
+                    _, p2 = shapiro(group2_data) if len(group2_data) <= 5000 else (None, 0)
+                    
+                    st.write(f"**Group 1 ({groups[0]}):** n={len(group1_data)}")
+                    st.write(f"**Group 2 ({groups[1]}):** n={len(group2_data)}")
+                    
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        st.subheader("Parametric Test (t-test)")
+                        
+                        # Check variance equality
+                        _, p_var = stats.levene(group1_data, group2_data)
+                        
+                        if p_var > significance_level:
+                            t_stat, p_value = ttest_ind(group1_data, group2_data, equal_var=True)
+                            st.write("**Equal variance assumed**")
+                        else:
+                            t_stat, p_value = ttest_ind(group1_data, group2_data, equal_var=False)
+                            st.write("**Equal variance not assumed (Welch's t-test)**")
+                        
+                        st.write(f"t-statistic: {t_stat:.4f}")
+                        st.write(f"p-value: {p_value:.4f}")
+                        
+                        if p_value < significance_level:
+                            st.success(f"✓ Significant difference (p < {significance_level})")
+                        else:
+                            st.info(f"✗ No significant difference (p > {significance_level})")
+                    
+                    with col2:
+                        st.subheader("Non-parametric Test (Mann-Whitney U)")
+                        
+                        u_stat, p_value = mannwhitneyu(group1_data, group2_data)
+                        st.write(f"U-statistic: {u_stat:.4f}")
+                        st.write(f"p-value: {p_value:.4f}")
+                        
+                        if p_value < significance_level:
+                            st.success(f"✓ Significant difference (p < {significance_level})")
+                        else:
+                            st.info(f"✗ No significant difference (p > {significance_level})")
+                    
+                    # Visualization
+                    fig = go.Figure()
+                    fig.add_trace(go.Box(y=group1_data, name=str(groups[0])))
+                    fig.add_trace(go.Box(y=group2_data, name=str(groups[1])))
+                    fig.update_layout(title="Group Comparison Box Plot")
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.warning(f"Grouping variable should have exactly 2 categories (found {len(groups)})")
+        
+        elif test_type == "Multiple groups comparison":
+            st.subheader("Multiple Groups Comparison")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                numeric_var = st.selectbox("Select numeric variable", numeric_cols, key='multi_num')
+            
+            with col2:
+                group_var = st.selectbox("Select grouping variable", categorical_cols, key='multi_cat')
+            
+            if numeric_var and group_var:
+                groups = df[group_var].dropna().unique()
+                group_data = [df[df[group_var] == g][numeric_var].dropna() for g in groups]
+                
+                st.write(f"**Number of groups:** {len(groups)}")
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.subheader("Parametric Test (ANOVA)")
+                    
+                    f_stat, p_value = f_oneway(*group_data)
+                    st.write(f"F-statistic: {f_stat:.4f}")
+                    st.write(f"p-value: {p_value:.4f}")
+                    
+                    if p_value < significance_level:
+                        st.success(f"✓ Significant differences among groups (p < {significance_level})")
+                        
+                        # Post-hoc test
+                        if len(groups) > 2:
+                            st.subheader("Post-hoc Analysis (Tukey HSD)")
+                            
+                            # Prepare data for Tukey
+                            tukey_data = df[[numeric_var, group_var]].dropna()
+                            tukey_result = pairwise_tukeyhsd(tukey_data[numeric_var], 
+                                                             tukey_data[group_var])
+                            
+                            result_df = pd.DataFrame(data=tukey_result.summary().data[1:],
+                                                    columns=tukey_result.summary().data[0])
+                            st.dataframe(result_df)
+                    else:
+                        st.info(f"✗ No significant differences among groups (p > {significance_level})")
+                
+                with col2:
+                    st.subheader("Non-parametric Test (Kruskal-Wallis)")
+                    
+                    h_stat, p_value = kruskal(*group_data)
+                    st.write(f"H-statistic: {h_stat:.4f}")
+                    st.write(f"p-value: {p_value:.4f}")
+                    
+                    if p_value < significance_level:
+                        st.success(f"✓ Significant differences among groups (p < {significance_level})")
+                    else:
+                        st.info(f"✗ No significant differences among groups (p > {significance_level})")
+                
+                # Visualization
+                fig = go.Figure()
+                for i, g in enumerate(groups):
+                    fig.add_trace(go.Violin(y=group_data[i], name=str(g), box_visible=True))
+                fig.update_layout(title="Group Comparison (Violin Plot)")
+                st.plotly_chart(fig, use_container_width=True)
+    
+    # Tab 4: Correlation Analysis
     with tab4:
         st.header("Correlation Analysis")
         
         numeric_cols = df.select_dtypes(include=[np.number]).columns
-        if len(numeric_cols) >= 2 and show_correlation:
-            # Correlation matrix
-            corr_matrix = df[numeric_cols].corr()
+        
+        if len(numeric_cols) >= 2:
+            # Select variables for correlation
+            selected_vars = st.multiselect(
+                "Select variables for correlation analysis",
+                numeric_cols,
+                default=numeric_cols[:min(5, len(numeric_cols))]
+            )
             
-            col1, col2 = st.columns([2, 1])
-            
-            with col1:
-                st.subheader("Correlation Heatmap")
-                fig = px.imshow(
-                    corr_matrix,
-                    text_auto=True,
-                    aspect="auto",
-                    color_continuous_scale='RdBu_r',
-                    title="Pearson Correlation Matrix"
-                )
-                st.plotly_chart(fig, use_container_width=True)
-            
-            with col2:
-                st.subheader("Correlation Statistics")
+            if len(selected_vars) >= 2:
+                # Check normality for each variable
+                normality_results = {}
+                for var in selected_vars:
+                    data = df[var].dropna()
+                    if len(data) <= 5000:
+                        _, p_val = shapiro(data)
+                        normality_results[var] = p_val > significance_level
                 
-                # Get upper triangle of correlation matrix
-                upper_tri = corr_matrix.where(
-                    np.triu(np.ones(corr_matrix.shape), k=1).astype(bool)
-                )
+                st.subheader("Correlation Matrix")
                 
-                # Find significant correlations (|r| > 0.5)
-                significant = upper_tri.stack()
-                significant = significant[abs(significant) > 0.5].sort_values(ascending=False)
+                # Calculate different correlation coefficients
+                pearson_corr = df[selected_vars].corr(method='pearson')
+                spearman_corr = df[selected_vars].corr(method='spearman')
+                kendall_corr = df[selected_vars].corr(method='kendall')
                 
-                if len(significant) > 0:
-                    st.write("**Strong Correlations (|r| > 0.5):**")
-                    for (var1, var2), corr in significant.items():
-                        strength = "Positive" if corr > 0 else "Negative"
-                        st.write(f"• {var1} & {var2}: {corr:.3f} ({strength})")
-                else:
-                    st.write("No strong correlations found")
-            
-            # Scatter plot matrix
-            if len(numeric_cols) <= 5:
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    st.write("**Pearson Correlation**")
+                    fig = px.imshow(
+                        pearson_corr,
+                        text_auto=True,
+                        aspect="auto",
+                        color_continuous_scale='RdBu_r',
+                        title="Pearson (Parametric)"
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                
+                with col2:
+                    st.write("**Spearman Correlation**")
+                    fig = px.imshow(
+                        spearman_corr,
+                        text_auto=True,
+                        aspect="auto",
+                        color_continuous_scale='RdBu_r',
+                        title="Spearman (Non-parametric)"
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                
+                with col3:
+                    st.write("**Kendall Correlation**")
+                    fig = px.imshow(
+                        kendall_corr,
+                        text_auto=True,
+                        aspect="auto",
+                        color_continuous_scale='RdBu_r',
+                        title="Kendall Tau (Non-parametric)"
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                
+                # Detailed correlation tests
+                st.subheader("Detailed Correlation Tests")
+                
+                # Create pairwise correlation tests
+                results = []
+                for i in range(len(selected_vars)):
+                    for j in range(i+1, len(selected_vars)):
+                        var1 = selected_vars[i]
+                        var2 = selected_vars[j]
+                        
+                        # Remove missing values
+                        clean_data = df[[var1, var2]].dropna()
+                        
+                        if len(clean_data) > 3:
+                            # Pearson
+                            r_pearson, p_pearson = pearsonr(clean_data[var1], clean_data[var2])
+                            
+                            # Spearman
+                            r_spearman, p_spearman = spearmanr(clean_data[var1], clean_data[var2])
+                            
+                            # Kendall
+                            r_kendall, p_kendall = kendalltau(clean_data[var1], clean_data[var2])
+                            
+                            # Recommendation based on normality
+                            both_normal = normality_results.get(var1, False) and normality_results.get(var2, False)
+                            
+                            results.append({
+                                'Variable 1': var1,
+                                'Variable 2': var2,
+                                'Pearson r': round(r_pearson, 3),
+                                'Pearson p': round(p_pearson, 4),
+                                'Spearman ρ': round(r_spearman, 3),
+                                'Spearman p': round(p_spearman, 4),
+                                'Kendall τ': round(r_kendall, 3),
+                                'Kendall p': round(p_kendall, 4),
+                                'Recommended': 'Pearson' if both_normal else 'Spearman/Kendall',
+                                'N': len(clean_data)
+                            })
+                
+                results_df = pd.DataFrame(results)
+                st.dataframe(results_df, use_container_width=True)
+                
+                # Scatter plot matrix
                 st.subheader("Scatter Plot Matrix")
                 fig = px.scatter_matrix(
-                    df[numeric_cols],
-                    dimensions=numeric_cols,
+                    df[selected_vars],
+                    dimensions=selected_vars,
                     title="Pairwise Relationships"
                 )
                 fig.update_traces(diagonal_visible=False)
                 fig.update_layout(height=800)
                 st.plotly_chart(fig, use_container_width=True)
-            
-            # Correlation tests
-            with st.expander("Detailed Correlation Tests"):
-                st.subheader("Correlation Test Results")
-                
-                results = []
-                for i in range(len(numeric_cols)):
-                    for j in range(i+1, len(numeric_cols)):
-                        var1 = numeric_cols[i]
-                        var2 = numeric_cols[j]
-                        
-                        # Remove missing values
-                        clean_data = df[[var1, var2]].dropna()
-                        if len(clean_data) > 3:
-                            corr, p_value = stats.pearsonr(clean_data[var1], clean_data[var2])
-                            
-                            sig_level = ""
-                            if p_value < 0.001:
-                                sig_level = "***"
-                            elif p_value < 0.01:
-                                sig_level = "**"
-                            elif p_value < 0.05:
-                                sig_level = "*"
-                            
-                            results.append({
-                                'Variable 1': var1,
-                                'Variable 2': var2,
-                                'Correlation': round(corr, 3),
-                                'P-value': round(p_value, 4),
-                                'Significance': sig_level,
-                                'Sample Size': len(clean_data)
-                            })
-                
-                results_df = pd.DataFrame(results)
-                st.dataframe(results_df, use_container_width=True)
         else:
             st.warning("Need at least 2 numeric variables for correlation analysis")
     
-    # Tab 5: Report
+    # Tab 5: Regression Analysis
     with tab5:
-        st.header("Analysis Report")
+        st.header("Regression Analysis")
         
-        if st.button("Generate Complete Report"):
-            with st.spinner("Generating report..."):
-                # Create report content
+        numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+        
+        if len(numeric_cols) >= 2:
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                dependent_var = st.selectbox("Select dependent variable (Y)", numeric_cols)
+            
+            with col2:
+                independent_vars = st.multiselect(
+                    "Select independent variables (X)",
+                    [col for col in numeric_cols if col != dependent_var]
+                )
+            
+            if dependent_var and len(independent_vars) >= 1:
+                # Prepare data
+                X = df[independent_vars].copy()
+                y = df[dependent_var].copy()
+                
+                # Remove missing values
+                mask = ~(X.isna().any(axis=1) | y.isna())
+                X_clean = X[mask]
+                y_clean = y[mask]
+                
+                # Add constant for intercept
+                X_with_const = sm.add_constant(X_clean)
+                
+                # Fit model
+                model = sm.OLS(y_clean, X_with_const).fit()
+                
+                # Model summary
+                st.subheader("Regression Model Summary")
+                
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("R-squared", f"{model.rsquared:.4f}")
+                with col2:
+                    st.metric("Adj. R-squared", f"{model.rsquared_adj:.4f}")
+                with col3:
+                    st.metric("F-statistic", f"{model.fvalue:.2f}")
+                
+                st.write(f"**F-test p-value:** {model.f_pvalue:.4f}")
+                
+                # Coefficients table
+                coef_df = pd.DataFrame({
+                    'Variable': ['Intercept'] + independent_vars,
+                    'Coefficient': model.params.values,
+                    'Std Error': model.bse.values,
+                    't-value': model.tvalues.values,
+                    'p-value': model.pvalues.values,
+                    'Conf. Interval Low': model.conf_int()[0],
+                    'Conf. Interval High': model.conf_int()[1]
+                })
+                
+                st.dataframe(coef_df.round(4), use_container_width=True)
+                
+                # Diagnostic plots
+                st.subheader("Regression Diagnostics")
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    # Residuals vs Fitted
+                    fig = go.Figure()
+                    fig.add_trace(go.Scatter(
+                        x=model.fittedvalues,
+                        y=model.resid,
+                        mode='markers',
+                        marker=dict(color='blue', size=5)
+                    ))
+                    fig.add_hline(y=0, line_dash="dash", line_color="red")
+                    fig.update_layout(
+                        title="Residuals vs Fitted Values",
+                        xaxis_title="Fitted Values",
+                        yaxis_title="Residuals"
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                
+                with col2:
+                    # Q-Q plot of residuals
+                    from scipy import stats
+                    
+                    theoretical_quantiles = stats.norm.ppf(
+                        np.linspace(0.01, 0.99, len(model.resid))
+                    )
+                    sorted_residuals = np.sort(model.resid)
+                    
+                    fig = go.Figure()
+                    fig.add_trace(go.Scatter(
+                        x=theoretical_quantiles,
+                        y=sorted_residuals,
+                        mode='markers',
+                        marker=dict(color='blue', size=5)
+                    ))
+                    
+                    # Add reference line
+                    z = np.polyfit(theoretical_quantiles, sorted_residuals, 1)
+                    p = np.poly1d(z)
+                    fig.add_trace(go.Scatter(
+                        x=theoretical_quantiles,
+                        y=p(theoretical_quantiles),
+                        mode='lines',
+                        name='Reference Line',
+                        line=dict(color='red', dash='dash')
+                    ))
+                    
+                    fig.update_layout(
+                        title="Q-Q Plot of Residuals",
+                        xaxis_title="Theoretical Quantiles",
+                        yaxis_title="Sample Quantiles"
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                
+                # Check assumptions
+                st.subheader("Assumption Checks")
+                
+                # Normality of residuals
+                _, p_norm = stats.shapiro(model.resid) if len(model.resid) <= 5000 else (None, 1)
+                st.write(f"**Normality of residuals (Shapiro-Wilk):** p-value = {p_norm:.4f}")
+                if p_norm > significance_level:
+                    st.success("✓ Residuals appear normally distributed")
+                else:
+                    st.warning("⚠️ Residuals may not be normally distributed")
+                
+                # Homoscedasticity
+                _, p_het = stats.bartlett(model.fittedvalues, model.resid)
+                st.write(f"**Homoscedasticity (Bartlett's test):** p-value = {p_het:.4f}")
+                if p_het > significance_level:
+                    st.success("✓ Variances appear homogeneous")
+                else:
+                    st.warning("⚠️ Heteroscedasticity may be present")
+    
+    # Tab 6: Complete Report
+    with tab6:
+        st.header("Complete Statistical Analysis Report")
+        
+        if st.button("Generate Complete Statistical Report"):
+            with st.spinner("Generating comprehensive report..."):
                 report_lines = []
-                report_lines.append("=" * 60)
-                report_lines.append("COMPREHENSIVE DATA ANALYSIS REPORT")
-                report_lines.append("=" * 60)
-                report_lines.append(f"\nGenerated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                report_lines.append("=" * 70)
+                report_lines.append("COMPREHENSIVE STATISTICAL ANALYSIS REPORT")
+                report_lines.append("=" * 70)
+                report_lines.append(f"\nGenerated: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}")
                 report_lines.append(f"Dataset: {uploaded_file.name if uploaded_file else 'Unknown'}")
                 report_lines.append(f"Dimensions: {df.shape[0]} rows × {df.shape[1]} columns")
+                report_lines.append(f"Significance Level: α = {significance_level}")
                 
-                # Dataset structure
-                report_lines.append("\n" + "=" * 40)
-                report_lines.append("DATASET STRUCTURE")
-                report_lines.append("=" * 40)
+                # Section 1: Data Overview
+                report_lines.append("\n" + "=" * 50)
+                report_lines.append("1. DATA OVERVIEW")
+                report_lines.append("=" * 50)
                 
-                for col in df.columns:
-                    report_lines.append(f"\nColumn: {col}")
-                    report_lines.append(f"  Type: {df[col].dtype}")
-                    report_lines.append(f"  Non-null: {df[col].count()}/{len(df)}")
-                    report_lines.append(f"  Unique: {df[col].nunique()}")
+                report_lines.append(f"\nTotal Observations: {df.shape[0]}")
+                report_lines.append(f"Total Variables: {df.shape[1]}")
+                report_lines.append(f"Complete Cases: {df.dropna().shape[0]}")
+                report_lines.append(f"Missing Values: {df.isna().sum().sum()}")
                 
-                # Numeric statistics
+                # Section 2: Variable Types
+                report_lines.append("\n" + "=" * 50)
+                report_lines.append("2. VARIABLE CLASSIFICATION")
+                report_lines.append("=" * 50)
+                
                 numeric_cols = df.select_dtypes(include=[np.number]).columns
-                if len(numeric_cols) > 0:
-                    report_lines.append("\n" + "=" * 40)
-                    report_lines.append("NUMERIC VARIABLE STATISTICS")
-                    report_lines.append("=" * 40)
-                    
-                    for col in numeric_cols:
-                        report_lines.append(f"\n{col}:")
-                        report_lines.append(f"  Mean: {df[col].mean():.3f}")
-                        report_lines.append(f"  Std Dev: {df[col].std():.3f}")
-                        report_lines.append(f"  Median: {df[col].median():.3f}")
-                        report_lines.append(f"  Min: {df[col].min():.3f}")
-                        report_lines.append(f"  Max: {df[col].max():.3f}")
-                        report_lines.append(f"  Skewness: {df[col].skew():.3f}")
+                categorical_cols = df.select_dtypes(include=['object', 'category']).columns
                 
-                # Join report
+                report_lines.append(f"\nNumeric Variables ({len(numeric_cols)}):")
+                for col in numeric_cols:
+                    report_lines.append(f"  • {col}")
+                
+                report_lines.append(f"\nCategorical Variables ({len(categorical_cols)}):")
+                for col in categorical_cols:
+                    report_lines.append(f"  • {col}")
+                
+                # Section 3: Normality Assessment
+                report_lines.append("\n" + "=" * 50)
+                report_lines.append("3. NORMALITY ASSESSMENT")
+                report_lines.append("=" * 50)
+                
+                for col in numeric_cols[:10]:  # Limit to first 10
+                    data = df[col].dropna()
+                    if len(data) >= 3:
+                        if len(data) <= 5000:
+                            stat, p_val = shapiro(data)
+                            report_lines.append(f"\n{col}:")
+                            report_lines.append(f"  • Shapiro-Wilk p-value: {p_val:.4f}")
+                            report_lines.append(f"  • Distribution: {'Normal' if p_val > significance_level else 'Non-normal'}")
+                            report_lines.append(f"  • Skewness: {data.skew():.3f}")
+                            report_lines.append(f"  • Kurtosis: {data.kurtosis():.3f}")
+                
+                # Section 4: Recommended Statistical Tests
+                report_lines.append("\n" + "=" * 50)
+                report_lines.append("4. RECOMMENDED STATISTICAL TESTS")
+                report_lines.append("=" * 50)
+                
+                for col in numeric_cols:
+                    data = df[col].dropna()
+                    if len(data) >= 3:
+                        if len(data) <= 5000:
+                            _, p_val = shapiro(data)
+                            is_normal = p_val > significance_level
+                            
+                            report_lines.append(f"\n{col}:")
+                            if is_normal:
+                                report_lines.append("  • Parametric tests recommended:")
+                                report_lines.append("    - t-test (2 groups)")
+                                report_lines.append("    - ANOVA (multiple groups)")
+                                report_lines.append("    - Pearson correlation")
+                            else:
+                                report_lines.append("  • Non-parametric tests recommended:")
+                                report_lines.append("    - Mann-Whitney U test (2 groups)")
+                                report_lines.append("    - Kruskal-Wallis test (multiple groups)")
+                                report_lines.append("    - Spearman correlation")
+                
+                # Section 5: Key Findings
+                report_lines.append("\n" + "=" * 50)
+                report_lines.append("5. KEY STATISTICAL FINDINGS")
+                report_lines.append("=" * 50)
+                
+                # Check for significant correlations
+                if len(numeric_cols) >= 2:
+                    corr_matrix = df[numeric_cols].corr()
+                    significant_corrs = []
+                    for i in range(len(numeric_cols)):
+                        for j in range(i+1, len(numeric_cols)):
+                            if abs(corr_matrix.iloc[i, j]) > 0.5:
+                                significant_corrs.append(
+                                    f"{numeric_cols[i]} & {numeric_cols[j]}: {corr_matrix.iloc[i, j]:.3f}"
+                                )
+                    
+                    if significant_corrs:
+                        report_lines.append("\nStrong Correlations (|r| > 0.5):")
+                        for corr in significant_corrs[:10]:
+                            report_lines.append(f"  • {corr}")
+                
+                # Create report text
                 report_text = "\n".join(report_lines)
                 
                 # Display report
-                st.text_area("Generated Report", report_text, height=400)
+                st.text_area("Statistical Analysis Report", report_text, height=500)
                 
                 # Download button
                 st.download_button(
-                    label="📥 Download Report",
+                    label="📥 Download Statistical Report",
                     data=report_text,
-                    file_name=f"data_analysis_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+                    file_name=f"statistical_report_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.txt",
                     mime="text/plain"
                 )
 
 else:
     # Welcome message when no data is loaded
-    st.info("👆 Please upload a CSV or Excel file to begin analysis")
+    st.info("👆 Please upload a CSV or Excel file to begin statistical analysis")
     
-    # Example of what the app can do
     st.markdown("""
-    ### Features:
-    - **📊 Automated Analysis**: Automatically detects data types and generates appropriate statistics
-    - **📈 Interactive Visualizations**: Dynamic plots with Plotly for better exploration
-    - **🔍 Missing Data Analysis**: Identifies and visualizes missing values
-    - **📐 Descriptive Statistics**: Comprehensive statistical summaries
-    - **🔄 Correlation Analysis**: Examines relationships between variables
-    - **📑 Report Generation**: Export complete analysis reports
+    ### 🎯 Features:
     
-    ### Supported File Formats:
-    - CSV files (.csv)
-    - Excel files (.xlsx, .xls)
+    #### 1. **Automatic Test Suggestions**
+    - Normality testing (Shapiro-Wilk, D'Agostino's K², Anderson-Darling)
+    - Automatic recommendation of parametric vs non-parametric tests
+    - Based on data distribution and sample size
+    
+    #### 2. **Comprehensive Statistical Tests**
+    - **Group Comparisons**: t-test, Mann-Whitney U, ANOVA, Kruskal-Wallis
+    - **Paired Tests**: Paired t-test, Wilcoxon signed-rank
+    - **Correlation**: Pearson, Spearman, Kendall Tau
+    - **Categorical**: Chi-square, Fisher's exact test
+    - **Post-hoc**: Tukey HSD for multiple comparisons
+    
+    #### 3. **Regression Analysis**
+    - Multiple linear regression
+    - Diagnostic plots and assumption checks
+    - Coefficient interpretation
+    
+    #### 4. **Visualization**
+    - Distribution plots with normality curves
+    - Q-Q plots for normality assessment
+    - Correlation heatmaps (parametric and non-parametric)
+    - Box plots and violin plots for group comparisons
+    - Residual diagnostic plots
+    
+    #### 5. **Complete Statistical Report**
+    - Automated report generation
+    - Key findings highlighted
+    - Recommendations for further analysis
     """)
 
 # Footer
@@ -489,7 +849,7 @@ st.divider()
 st.markdown(
     """
     <div style='text-align: center'>
-        <p>Built with Streamlit • Comprehensive Data Analysis Tool v1.0</p>
+        <p>Advanced Statistical Analysis Tool • Automatically suggests and performs appropriate tests based on your data</p>
     </div>
     """,
     unsafe_allow_html=True
